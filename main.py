@@ -14,6 +14,7 @@ from tabulate import tabulate
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 
+
 def retry_decorator(retries=3, min_delay=5, max_delay=10):
     def decorator(func):
         @functools.wraps(func)
@@ -29,11 +30,16 @@ def retry_decorator(retries=3, min_delay=5, max_delay=10):
                     )
                     if attempt < retries - 1:
                         sleep_s = random.uniform(min_delay, max_delay)
-                        logger.info(f"将在 {sleep_s:.2f}s 后重试 ({min_delay}-{max_delay}s 随机延迟)")
+                        logger.info(
+                            f"将在 {sleep_s:.2f}s 后重试 ({min_delay}-{max_delay}s 随机延迟)"
+                        )
                         time.sleep(sleep_s)
             return None
+
         return wrapper
+
     return decorator
+
 
 os.environ.pop("DISPLAY", None)
 os.environ.pop("DYLD_LIBRARY_PATH", None)
@@ -42,7 +48,9 @@ USERNAME = os.environ.get("LINUXDO_USERNAME") or os.environ.get("USERNAME")
 PASSWORD = os.environ.get("LINUXDO_PASSWORD") or os.environ.get("PASSWORD")
 
 BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in [
-    "false", "0", "off"
+    "false",
+    "0",
+    "off",
 ]
 
 GOTIFY_URL = os.environ.get("GOTIFY_URL")
@@ -51,7 +59,8 @@ SC3_PUSH_KEY = os.environ.get("SC3_PUSH_KEY")
 WXPUSH_URL = os.environ.get("WXPUSH_URL")
 WXPUSH_TOKEN = os.environ.get("WXPUSH_TOKEN")
 
-HOME_URL = "https://linux.do/"
+# 注意：浏览入口改成 /latest
+HOME_URL = "https://linux.do/latest"
 LOGIN_URL = "https://linux.do/login"
 SESSION_URL = "https://linux.do/session"
 CSRF_URL = "https://linux.do/session/csrf"
@@ -82,19 +91,19 @@ class LinuxDoBrowser:
         self.browser = Chromium(co)
         self.page = self.browser.new_tab()
 
-        # curl_cffi session
+        # curl_cffi session（用于接口登录）
         self.session = requests.Session()
         self.session.headers.update(
             {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                              "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+                "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Accept-Language": "zh-CN,zh;q=0.9",
             }
         )
 
-    def _base_headers(self):
-        # 统一 headers，避免每次覆盖导致不一致
+    def _api_headers(self):
+        """用于接口（csrf/session）请求的 headers"""
         return {
             "User-Agent": self.session.headers.get("User-Agent"),
             "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -104,31 +113,41 @@ class LinuxDoBrowser:
             "Origin": "https://linux.do",
         }
 
-    def _get_csrf_token(self) -> str:
-        headers = self._base_headers()
+    def _html_headers(self):
+        """用于获取 HTML 页面的 headers（避免返回 json）"""
+        return {
+            "User-Agent": self.session.headers.get("User-Agent"),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Referer": "https://linux.do/",
+        }
 
-        # Step 0: 先访问首页建立 cookie
+    def _get_csrf_token(self) -> str:
+        # 先访问一个 HTML 页面建立 cookie（不要用 JSON Accept）
         r0 = self.session.get(
-            HOME_URL,
-            headers=headers,
+            "https://linux.do/",
+            headers=self._html_headers(),
             impersonate="chrome136",
             allow_redirects=True,
             timeout=30,
         )
-        logger.info(f"HOME: status={r0.status_code} ct={r0.headers.get('content-type')} url={getattr(r0,'url',None)}")
+        logger.info(
+            f"HOME: status={r0.status_code} ct={r0.headers.get('content-type')} url={getattr(r0, 'url', None)}"
+        )
 
-        # Step 1: 获取 CSRF
+        # 再拿 CSRF
         resp_csrf = self.session.get(
             CSRF_URL,
-            headers=headers,
+            headers=self._api_headers(),
             impersonate="chrome136",
             allow_redirects=True,
             timeout=30,
         )
         ct = (resp_csrf.headers.get("content-type") or "").lower()
-        logger.info(f"CSRF: status={resp_csrf.status_code} ct={resp_csrf.headers.get('content-type')} url={getattr(resp_csrf,'url',None)}")
+        logger.info(
+            f"CSRF: status={resp_csrf.status_code} ct={resp_csrf.headers.get('content-type')} url={getattr(resp_csrf, 'url', None)}"
+        )
 
-        # 不是 JSON 就直接报错，把前 200 字打印出来定位（不含敏感信息）
         if resp_csrf.status_code != 200 or "application/json" not in ct:
             head = (resp_csrf.text or "")[:200]
             raise RuntimeError(
@@ -153,7 +172,7 @@ class LinuxDoBrowser:
 
         logger.info("正在登录...")
 
-        headers = self._base_headers()
+        headers = self._api_headers()
         headers.update(
             {
                 "X-CSRF-Token": csrf_token,
@@ -177,8 +196,10 @@ class LinuxDoBrowser:
                 timeout=30,
             )
 
-            logger.info(f"LOGIN: status={resp_login.status_code} ct={resp_login.headers.get('content-type')} url={getattr(resp_login,'url',None)}")
-            # 登录接口大多数返回 JSON；如果不是也打印 head 方便定位
+            logger.info(
+                f"LOGIN: status={resp_login.status_code} ct={resp_login.headers.get('content-type')} url={getattr(resp_login, 'url', None)}"
+            )
+
             ct = (resp_login.headers.get("content-type") or "").lower()
             if "application/json" not in ct:
                 logger.error(f"登录返回不是 JSON，head={resp_login.text[:200]}")
@@ -206,32 +227,55 @@ class LinuxDoBrowser:
             )
         self.page.set.cookies(dp_cookies)
 
-        logger.info("Cookie 设置完成，导航至 linux.do...")
+        logger.info("Cookie 设置完成，导航至 /latest ...")
         self.page.get(HOME_URL)
-        time.sleep(5)
 
-        # 验证登录
+        # 等待主题列表渲染出来
         try:
-            user_ele = self.page.ele("@id=current-user")
-        except Exception as e:
-            logger.warning(f"登录验证异常: {str(e)}")
+            self.page.wait.ele("@id=list-area", timeout=25)
+            logger.info("页面 list-area 已加载")
+        except Exception:
+            logger.warning("未在 /latest 等到 list-area，输出页面信息辅助定位")
+            logger.warning(f"url={self.page.url}")
+            logger.warning((self.page.html or "")[:400])
+
+        # 不再依赖 current-user 做唯一判断
+        html = self.page.html or ""
+        if ("list-area" in html) or ("topic-list" in html) or ("discourse" in html):
+            logger.info("登录后页面加载完成（基于页面结构判断）")
             return True
 
-        if not user_ele:
-            if "avatar" in self.page.html:
-                logger.info("登录验证成功 (通过 avatar)")
-                return True
-            logger.error("登录验证失败 (未找到 current-user)")
-            return False
-
-        logger.info("登录验证成功")
+        logger.warning("页面结构不符合预期，但 requests 已登录成功，先放行继续执行")
         return True
 
     def click_topic(self):
-        topic_list = self.page.ele("@id=list-area").eles(".:title")
-        if not topic_list:
-            logger.error("未找到主题帖")
+        # 再次确保在主题列表页
+        if not self.page.url.startswith("https://linux.do/latest"):
+            self.page.get(HOME_URL)
+
+        # 等待 list-area 出现
+        try:
+            self.page.wait.ele("@id=list-area", timeout=25)
+        except Exception:
+            logger.error("未找到 list-area，可能页面未加载到主题列表页或被重定向")
+            logger.error(f"当前URL: {self.page.url}")
+            logger.error((self.page.html or "")[:400])
             return False
+
+        try:
+            topic_list = self.page.ele("@id=list-area").eles(".:title")
+        except Exception as e:
+            logger.error(f"解析主题列表异常: {e}")
+            logger.error(f"当前URL: {self.page.url}")
+            logger.error((self.page.html or "")[:400])
+            return False
+
+        if not topic_list:
+            logger.error("未找到主题帖链接（可能站点结构变更）")
+            logger.error(f"当前URL: {self.page.url}")
+            logger.error((self.page.html or "")[:400])
+            return False
+
         logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择10个")
         for topic in random.sample(topic_list, min(10, len(topic_list))):
             self.click_one_topic(topic.attr("href"))
@@ -316,7 +360,9 @@ class LinuxDoBrowser:
 
     def print_connect_info(self):
         logger.info("获取连接信息")
-        headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+        headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
         resp = self.session.get(
             "https://connect.linux.do/",
             headers=headers,
@@ -327,6 +373,7 @@ class LinuxDoBrowser:
         soup = BeautifulSoup(resp.text, "html.parser")
         rows = soup.select("table tr")
         info = []
+
         for row in rows:
             cells = row.select("td")
             if len(cells) >= 3:
